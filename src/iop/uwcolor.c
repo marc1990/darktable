@@ -25,6 +25,8 @@
 
 #include "bauhaus/bauhaus.h"
 #include "common/opencl.h"
+#include "common/gaussian.h"
+#include "common/imagebuf.h"
 #include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
@@ -47,6 +49,8 @@ typedef struct dt_iop_uwcolor_params_t
   float ch_green; // $MIN: 0.01 $MAX: 1.2 $DEFAULT: 0.98 $DESCRIPTION: "ch_green"
   float nf_red; // $MIN: -15.00 $MAX: 2.0 $DEFAULT: -8.0 $DESCRIPTION: "nf_red"
   float nf_green; // $MIN: -15.00 $MAX: 2.0 $DEFAULT: -8.0 $DESCRIPTION: "nf_green"
+  float noise_sigma; // $MIN: 0.1 $MAX: 3.0 $DEFAULT: 1.0 $DESCRIPTION: "noise_sigma"
+  float noise_sigma2; // $MIN: 0.01 $MAX: 1.0 $DEFAULT: 0.5 $DESCRIPTION: "noise_sigma"
   float levels[3];
 } dt_iop_uwcolor_params_t;
 
@@ -57,7 +61,10 @@ typedef struct dt_iop_uwcolor_gui_data_t
   GtkWidget *ch_green;
   GtkWidget *nf_red;
   GtkWidget *nf_green;
+  GtkWidget *noise_sigma;
+  GtkWidget *noise_sigma2;
   GtkWidget *bt_select_region;
+  
   int draw_selected_region;                     // are we drawing the selected region?
   float posx_from, posx_to, posy_from, posy_to; // coordinates of the area
   int button_down;                              // user pressed the mouse button?
@@ -74,6 +81,8 @@ typedef struct dt_iop_uwcolor_data_t
   float ch_green;
   float nf_red;
   float nf_green;
+  float noise_sigma;
+  float noise_sigma2;
 } dt_iop_uwcolor_data_t;
 
 
@@ -152,21 +161,17 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
 
   const float *const restrict in = (float *)ivoid;
   float *const restrict out = (float *)ovoid;
-  float * low_res_red;
-  float * low_res_green;
-  float * low_res_blue;
+  float * low_res;
+  float * low_res_gaus;
+  float * low_res_gaus2;
 
-  float const small_size = (roi_out->height/16+1) * (roi_out->width/16+1);
+  const float sigma = d->noise_sigma * roi_in->scale / piece->iscale;
+  const float sigma2 = d->noise_sigma2 * roi_in->scale / piece->iscale;
 
-  low_res_red = calloc(small_size, sizeof(float));
-  low_res_green = calloc(small_size, sizeof(float));
-  low_res_blue = calloc(small_size, sizeof(float));
-  for(int x = 0; x < small_size; x += 1) {
-    low_res_red[x] = 0.0;
-    low_res_green[x] = 0.0;
-    low_res_blue[x] = 0.0;
-}
-// GBRG
+  uint32_t width_small =  roi_out->width/2;
+  uint32_t height_small =  roi_out->height/2;
+
+  // GBRG
   int pos_green0[2] = {0,0};
   int pos_blue[2] = {0,1};
   int pos_red[2] = {1,0};
@@ -181,52 +186,88 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
     pos_red[1] = 0;
     pos_green1[0] = 1;
     pos_green1[1] = 0;
+  } else if(filters == 0x9) { // xtrans
+     dt_iop_set_module_trouble_message(self, _("unsupported xtrans input"),
+                                        _(" Only bayer filter rggb and gbrg are supported"),
+                                        "unsupported data format at current pipeline position");
+    return;
+  } else if(filters != 0x49494949) { // also not gbrg
+     dt_iop_set_module_trouble_message(self, _("unsupported bayer format at input"),
+                                        _(" Only bayer filter rggb and gbrg are supported"),
+                                        "unsupported data format at current pipeline position");
+    return;
   }
+  
+  low_res = dt_iop_image_alloc(width_small,height_small,4);
+  dt_iop_image_fill(low_res,0.0f,width_small,height_small,4);
 
-  if(filters == 9u)
-  { // xtrans float mosaiced
-  fprintf(stderr, "xtrans float mosaiced");
-  }else if(filters)
+  low_res_gaus = dt_iop_image_alloc(width_small,height_small,4);
+  low_res_gaus2 = dt_iop_image_alloc(width_small,height_small,4);
+
+  fprintf(stderr, "Has alloc all low res image buffers\n");
+  
+  // copy pixel from bayer to single channel
+  if(filters)
   { // bayer float mosaiced
-  fprintf(stderr, "bayer float mosaiced");
-  
-  
-
-  for(int x = pos_red[0]; x < roi_out->height; x += 2) // row
-  {
-    for(int y = pos_red[1]; y < roi_out->width; y += 2) // col
+    for(int x = pos_red[0]; x < height_small*2; x += 2) // row
     {
-      low_res_red[x/16*(roi_out->width/16+1)+y/16] += in[x*roi_out->width+y]/64;
+      for(int y = pos_red[1]; y < (width_small*2); y += 2) // col
+      {
+        low_res[(x/2*(width_small)+y/2)*4+0] = in[x*roi_out->width+y];
+      }
     }
-  }
-  for(int x = pos_green0[0]; x < roi_out->height; x += 2) // row
-  {
-    for(int y = pos_green0[1]; y < roi_out->width; y += 2) // col
+    for(int x = pos_green0[0]; x < height_small*2; x += 2) // row
     {
-      low_res_green[x/16*(roi_out->width/16+1)+y/16] += in[x*roi_out->width+y]/128;
+      for(int y = pos_green0[1]; y < (width_small*2); y += 2) // col
+      {
+        low_res[(x/2*(width_small)+y/2)*4+1] += in[x*roi_out->width+y]/2;
+      }
     }
-  }
-  for(int x = pos_green1[0]; x < roi_out->height; x += 2) // row
-  {
-    for(int y = pos_green1[1]; y < roi_out->width; y += 2) // col
+    for(int x = pos_green1[0]; x < height_small*2; x += 2) // row
     {
-      low_res_green[x/16*(roi_out->width/16+1)+y/16] += in[x*roi_out->width+y]/128;
+      for(int y = pos_green1[1]; y < width_small*2; y += 2) // col
+      {
+        low_res[(x/2*(width_small)+y/2)*4+1]  += in[x*roi_out->width+y]/2;
+      }
     }
-  }
-  for(int x = pos_blue[0]; x < roi_out->height; x += 2) // row
-  {
-    for(int y = pos_blue[0]; y < roi_out->width; y += 2) // col
+    for(int x = pos_blue[0]; x < height_small*2; x += 2) // row
     {
-      low_res_blue[x/16*(roi_out->width/16+1)+y/16] += in[x*roi_out->width+y]/64;
+      for(int y = pos_blue[0]; y < width_small*2; y += 2) // col
+      {
+        low_res[(x/2*(width_small)+y/2)*4+2]  = in[x*roi_out->width+y];
+      }
     }
-  }
   }else{
-    // non-mosaiced
-    fprintf(stderr, "non-mosaiced");
+    // non-mosaiced (will never happen because of input checks)
+    fprintf(stderr, "non-mosaiced\n");
   }
-  
 
+  fprintf(stderr, "finished copy pixels\n");
 
+  // Create a gaussian blurred version, use to restore color at low dynamic range
+  const float clipmax[4] = {100.0,100.0,100.0,100.0};
+  const float clipmin[4] = {0.0,0.0,0.0,0.0};
+  dt_gaussian_t *g = dt_gaussian_init(
+    width_small, 
+    height_small, 
+    4, 
+    clipmax, clipmin, sigma, DT_IOP_GAUSSIAN_ZERO);
+  if(!g) return;
+
+  dt_gaussian_t *g2 = dt_gaussian_init(
+    width_small, 
+    height_small, 
+    4, 
+    clipmax, clipmin, sigma2, DT_IOP_GAUSSIAN_ZERO);
+  if(!g) return;
+
+  dt_gaussian_blur_4c(g,low_res,low_res_gaus);
+  dt_gaussian_blur_4c(g2,low_res,low_res_gaus2);
+  dt_gaussian_free(g);
+
+  dt_free_align(low_res);
+
+  fprintf(stderr, "Done blur\n");
 
   const float depth = (d->depth);
   const float red = (d->ch_red);
@@ -235,75 +276,70 @@ void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const 
   const float nf_green = (d->nf_green);
   //const int npixels = roi_out->height * roi_out->width;
 
-  const float lr = pow(red,depth);
-  const float lg = pow(green,depth);
-  const float gr = 1/lr;
-  const float gg = 1/lg;
-  const float gb = 1;
+  const float lr = pow(red,depth); // loss red
+  const float lg = pow(green,depth); // loss green
+  const float gr = 1/lr; // compensation gain red
+  const float gg = 1/lg; // compensation gain greem
+  const float gb = 1; // compensation gain blue, aka none
+
+  const float power_noise_factor = 2.0;
 
   for(int x = 0; x < roi_out->height; x += 1) // row
   {
-  for(int y = 0; y < roi_out->width; y += 1) // col
-  {
-    const float evg = log2f(low_res_green[x/16*(roi_out->width/16+1)+y/16]);
-    const float evr = log2f(low_res_red[x/16*(roi_out->width/16+1)+y/16]);
-
-    const float ya = low_res_red[x/16*(roi_out->width/16+1)+y/16]*gr + 
-    low_res_green[x/16*(roi_out->width/16+1)+y/16]*gg +
-    low_res_blue[x/16*(roi_out->width/16+1)+y/16]*gb;
-    float yl;
-    // GBRG
-    if(x  > 0 && y > 0){
-      if(x % 2 == pos_green0[0] && y % 2 == pos_green0[1]){
-       
-          yl = in[x*roi_out->width+y]*gg/2 + in[(x-1)*roi_out->width+y-1]*gg/2 +
-          in[(x)*roi_out->width+y-1]*gb + in[(x-1)*roi_out->width+y]*gr;
-      }else if(x % 2 == pos_blue[0] && y % 2 == pos_blue[1]){
-          yl = in[x*roi_out->width+y-1]*gg/2 + in[(x-1)*roi_out->width+y]*gg/2 +
-          in[(x)*roi_out->width+y]*gb + in[(x-1)*roi_out->width+y-1]*gr;
-        
-      }else if(x % 2 == pos_red[0] && y % 2 == pos_red[1]){
-          yl = in[x*roi_out->width+y+1]*gg/2 + in[(x-1)*roi_out->width+y]*gg/2 +
-          in[(x-1)*roi_out->width+y-1]*gb + in[(x)*roi_out->width+y]*gr;
-      }else{ //if(x % 2 == pos_green1[0] && y % 2 == pos_green1[1]){
-          yl = in[x*roi_out->width+y]*gg/2 + in[(x-1)*roi_out->width+y-1]*gg/2 +
-          in[(x)*roi_out->width+y-1]*gb + in[(x-1)*roi_out->width+y]*gr;
-      }
+    for(int y = 0; y < roi_out->width; y += 1) // col
+    {
+      const uint32_t small_x = (x >= (height_small*2)) ? (height_small-1) : (x/2);
+      const uint32_t small_y = (y >= (width_small*2)) ? (width_small-1) : (y/2);
       
-    }else{
-      yl = 3;
-    }
-    const float gain = yl/ya;
-    //if (x > 200 && x < 205 && y > 200 && y < 205)
-    //fprintf(stderr, "ev(%d,%d) in %f %f ", x,y,evr,evg);
+      // gaussian color corrected "brightness" (ya)
+      const float ya = low_res_gaus[(small_x*(width_small)+small_y)*4+0]*gr + 
+      low_res_gaus[(small_x*(width_small)+small_y)*4+1]*gg +
+      low_res_gaus[(small_x*(width_small)+small_y)*4+2]*gb; 
+      
 
-    if(x % 2 == pos_green0[0] && y % 2 == pos_green0[1]){
-        const float nd = pow(1.5,fmin(evg - nf_green,0.0));
-        
-        //if (x > 200 && x < 205 && y > 200 && y < 205) fprintf(stderr, "green0 %f %f ", nf_green, nd);
-        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gg*nd + 
-        low_res_green[x/16*(roi_out->width/16+1)+y/16]*gg*(1-nd)*gain)*1.0; //red (hist)  or green
-      }else if(x % 2 == pos_blue[0] && y % 2 == pos_blue[1]){
-        
-        out[x*roi_out->width+y] = in[x*roi_out->width+y]*gb*1.0; //green or blue
-      }else if(x % 2 == pos_red[0] && y % 2 == pos_red[1]){
-        const float nd = pow(1.5,fmin(evr- nf_red,0.0));
-        
-        //if (x > 200 && x < 205 && y > 200 && y < 205) fprintf(stderr, "red %f %f ", nf_red, nd);
-        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gr*nd+ 
-        low_res_red[x/16*(roi_out->width/16+1)+y/16]*gr*(1-nd)*gain)*1.0; // green or red
-      }else{
-        const float nd = pow(1.5,fmin(evg - nf_green,0.0));
-        //if (x > 200 && x < 205 && y > 200 && y < 205) fprintf(stderr, "green1 %f %f ", nf_green, nd);
-        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gg*nd+ 
-        low_res_green[x/16*(roi_out->width/16+1)+y/16]*gg*(1-nd)*gain)*1.0; //blue  or green
-      }
-    
-    if (x > 200 && x < 205 && y > 200 && y < 205) fprintf(stderr, "\n");
+      
+      // GBRG
+      // calculate local color corrected "brightness" (yl)
+      const float yl = low_res_gaus2[(small_x*(width_small)+small_y)*4+0]*gr + 
+      low_res_gaus2[(small_x*(width_small)+small_y)*4+1]*gg + 
+      low_res_gaus2[(small_x*(width_small)+small_y)*4+2]*gb;
   
-   
+
+      // Calculate to local gain compare to gaussian
+      const float gain = yl/ya;
+
+      // When channel value are close/lower to noise floor use the gaussian value (only for red and green)
+      // First caclulete the exposure of pixel in ev (evg/evr)
+      // Next substract the nf_green/red and use power function
+      // with power_noise_factor to smooth out transition to gaussian.
+
+      if(x % 2 == pos_green0[0] && y % 2 == pos_green0[1]){ // green0
+        const float evg = log2f(low_res_gaus[(small_x*(width_small)+small_y)*4+1]);
+        const float nd = pow(power_noise_factor,fmin(evg - nf_green,0.0));        
+        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gg*nd + 
+        low_res_gaus[(small_x*(width_small)+small_y)*4+1]*gg*(1-nd)*gain);
+
+      }else if(x % 2 == pos_blue[0] && y % 2 == pos_blue[1]){ // blue
+        out[x*roi_out->width+y] = in[x*roi_out->width+y]*gb;
+
+      }else if(x % 2 == pos_red[0] && y % 2 == pos_red[1]){ // red
+        const float evr = log2f(low_res_gaus[(small_x*(width_small)+small_y)*4+0]);
+        const float nd = pow(power_noise_factor,fmin(evr- nf_red,0.0));
+        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gr*nd+ 
+        low_res_gaus[(small_x*(width_small)+small_y)*4+0]*gr*(1-nd)*gain); 
+
+      }else{ // green1
+        const float evg = log2f(low_res_gaus[(small_x*(width_small)+small_y)*4+1]);
+        const float nd = pow(power_noise_factor,fmin(evg - nf_green,0.0));
+        out[x*roi_out->width+y] = (in[x*roi_out->width+y]*gg*nd+ 
+        low_res_gaus[(small_x*(width_small)+small_y)*4+1]*gg*(1-nd)*gain);
+      }
+    }
   }
-  }
+
+  fprintf(stderr, "Done filter\n");
+  dt_free_align(low_res_gaus);
+  dt_free_align(low_res_gaus2);  
 }
 
 
@@ -409,6 +445,8 @@ void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pix
   d->ch_green = p->ch_green;
   d->nf_red = p->nf_red;
   d->nf_green = p->nf_green;
+  d->noise_sigma = p->noise_sigma;
+  d->noise_sigma2 = p->noise_sigma2;
 }
 
 void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
@@ -455,6 +493,14 @@ void gui_init(struct dt_iop_module_t *self)
   g->nf_green = dt_bauhaus_slider_from_params(self, "nf_green");
   dt_bauhaus_slider_set_format(g->nf_green, "%.2f");
   gtk_widget_set_tooltip_text(g->nf_green, _("noise floor in EV for green"));
+
+  g->noise_sigma = dt_bauhaus_slider_from_params(self, "noise_sigma");
+  dt_bauhaus_slider_set_format(g->noise_sigma, "%.2f");
+  gtk_widget_set_tooltip_text(g->noise_sigma, _("Gaussian sigma used for color reconstruct"));
+
+  g->noise_sigma2 = dt_bauhaus_slider_from_params(self, "noise_sigma2");
+  dt_bauhaus_slider_set_format(g->noise_sigma2, "%.3f");
+  gtk_widget_set_tooltip_text(g->noise_sigma2, _("Gaussian sigma used for color reconstruct"));
 
   g->blackpick = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
   dt_action_define_iop(self, "pickers", "black", g->blackpick, &dt_action_def_toggle);
