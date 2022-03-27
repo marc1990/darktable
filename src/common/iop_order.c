@@ -78,6 +78,7 @@ const char *dt_iop_order_string(const dt_iop_order_t order)
 
 const dt_iop_order_entry_t legacy_order[] = {
   { { 1.0f }, "rawprepare", 0},
+  { { 1.5f }, "uwcolor", 0},
   { { 2.0f }, "invert", 0},
   { { 3.0f }, "temperature", 0},
   { { 4.0f }, "highlights", 0},
@@ -167,12 +168,14 @@ const dt_iop_order_entry_t legacy_order[] = {
 
 // default order for RAW files, assumed to be linear from start
 const dt_iop_order_entry_t v30_order[] = {
-  { { 1.0 }, "rawprepare", 0},
-  { { 2.0 }, "invert", 0},
+  { { 1.0f }, "rawprepare", 0},
+  { { 1.2f }, "hotpixels", 0},
+  { { 1.5f }, "uwcolor", 0},
+  { { 2.0f }, "invert", 0},
   { { 3.0f }, "temperature", 0},
   { { 4.0f }, "highlights", 0},
   { { 5.0f }, "cacorrect", 0},
-  { { 6.0f }, "hotpixels", 0},
+  
   { { 7.0f }, "rawdenoise", 0},
   { { 8.0f }, "demosaic", 0},
   { { 9.0f }, "denoiseprofile", 0},
